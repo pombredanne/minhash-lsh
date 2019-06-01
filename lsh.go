@@ -11,10 +11,10 @@ const (
 	integrationPrecision = 0.01
 )
 
-type hashKeyFunc func(Signature) string
+type hashKeyFunc func([]uint64) string
 
 func hashKeyFuncGen(hashValueSize int) hashKeyFunc {
-	return func(sig Signature) string {
+	return func(sig []uint64) string {
 		s := make([]byte, hashValueSize*len(sig))
 		buf := make([]byte, 8)
 		for i, v := range sig {
@@ -87,7 +87,7 @@ func optimalKL(numHash int, t float64) (optK, optL int, fp, fn float64) {
 // NewMinhashLSH is the default constructor uses 32 bit hash value
 var NewMinhashLSH = NewMinhashLSH32
 
-type keys []string
+type keys []interface{}
 
 // For initial bootstrapping
 type initHashTable map[string]keys
@@ -163,27 +163,23 @@ func (f *MinhashLSH) Params() (k, l int) {
 
 // Add a key with MinHash signature into the index.
 // The key won't be searchable until Index() is called.
-func (f *MinhashLSH) Add(key string, sig Signature) {
+func (f *MinhashLSH) Add(key interface{}, sig []uint64) {
 	// Generate hash keys
 	Hs := make([]string, f.l)
 	for i := 0; i < f.l; i++ {
 		Hs[i] = f.hashKeyFunc(sig[i*f.k : (i+1)*f.k])
 	}
 	// Insert keys into the bootstrapping tables
-	var wg sync.WaitGroup
-	wg.Add(len(f.initHashTables))
 	for i := range f.initHashTables {
-		func(ht initHashTable, hk, key string) {
+		func(ht initHashTable, hk string, key interface{}) {
 			if _, exist := ht[hk]; exist {
 				ht[hk] = append(ht[hk], key)
 			} else {
 				ht[hk] = make(keys, 1)
 				ht[hk][0] = key
 			}
-			wg.Done()
 		}(f.initHashTables[i], Hs[i], key)
 	}
-	wg.Wait()
 }
 
 // Index makes all the keys added searchable.
@@ -213,62 +209,41 @@ func (f *MinhashLSH) Index() {
 }
 
 // Query returns candidate keys given the query signature.
-func (f *MinhashLSH) Query(sig Signature) []string {
-	result := make([]string, 0)
-	done := make(chan struct{})
-	for key := range f.query(sig, f.k, done) {
-		result = append(result, key)
+func (f *MinhashLSH) Query(sig []uint64) []interface{} {
+	set := f.query(sig, f.k)
+	results := make([]interface{}, 0, len(set))
+	for key := range set {
+		results = append(results, key)
 	}
-	return result
+	return results
 }
 
-func (f *MinhashLSH) query(sig Signature, minK int, done <-chan struct{}) <-chan string {
-	out := make(chan string)
-	go func() {
-		defer close(out)
-		seens := make(map[string]bool)
-		for K := f.k; K >= minK; K-- {
-			prefixSize := f.hashValueSize * K
-			// Generate hash keys
-			Hs := make([]string, f.l)
-			for i := 0; i < f.l; i++ {
-				Hs[i] = f.hashKeyFunc(sig[i*f.k : i*f.k+K])
-			}
-			// Query hash tables in parallel
-			keyChan := make(chan string)
-			var wg sync.WaitGroup
-			wg.Add(f.l)
-			for i := 0; i < f.l; i++ {
-				go func(ht hashTable, hk string) {
-					defer wg.Done()
-					k := sort.Search(len(ht), func(x int) bool {
-						return ht[x].hashKey[:prefixSize] >= hk
-					})
-					if k < len(ht) && ht[k].hashKey[:prefixSize] == hk {
-						for j := k; j < len(ht) && ht[j].hashKey[:prefixSize] == hk; j++ {
-							for _, key := range ht[j].keys {
-								select {
-								case keyChan <- key:
-								case <-done:
-									return
-								}
-							}
+func (f *MinhashLSH) query(sig []uint64, minK int) map[interface{}]bool {
+	results := make(map[interface{}]bool)
+	for K := f.k; K >= minK; K-- {
+		prefixSize := f.hashValueSize * K
+		// Generate hash keys
+		Hs := make([]string, f.l)
+		for i := 0; i < f.l; i++ {
+			Hs[i] = f.hashKeyFunc(sig[i*f.k : i*f.k+K])
+		}
+		// Query hash tables
+		for i := 0; i < f.l; i++ {
+			ht := f.hashTables[i]
+			hk := Hs[i]
+			k := sort.Search(len(ht), func(x int) bool {
+				return ht[x].hashKey[:prefixSize] >= hk
+			})
+			if k < len(ht) && ht[k].hashKey[:prefixSize] == hk {
+				for j := k; j < len(ht) && ht[j].hashKey[:prefixSize] == hk; j++ {
+					for _, key := range ht[j].keys {
+						if _, exist := results[key]; !exist {
+							results[key] = true
 						}
 					}
-				}(f.hashTables[i], Hs[i])
-			}
-			go func() {
-				wg.Wait()
-				close(keyChan)
-			}()
-			for key := range keyChan {
-				if _, seen := seens[key]; seen {
-					continue
 				}
-				out <- key
-				seens[key] = true
 			}
 		}
-	}()
-	return out
+	}
+	return results
 }

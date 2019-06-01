@@ -11,15 +11,13 @@ import (
 // The number of byte in a hash value for Minhash
 const hashValueSize = 8
 
-type Signature []uint64
-
-// Represents a MinHash object
+// Minhash represents a MinHash object
 type Minhash struct {
 	mw   *minwise.MinWise
 	seed int64
 }
 
-// Initialize a MinHash object with a seed and the number of
+// NewMinhash initialize a MinHash object with a seed and the number of
 // hash functions.
 func NewMinhash(seed int64, numHash int) *Minhash {
 	r := rand.New(rand.NewSource(seed))
@@ -54,7 +52,7 @@ func (m *Minhash) Push(b []byte) {
 	m.mw.Push(b)
 }
 
-// Export the MinHash signature.
+// Signature exports the MinHash as a list of hash values.
 func (m *Minhash) Signature() []uint64 {
 	return m.mw.Signature()
 }
